@@ -274,14 +274,14 @@ export function AudiobookForm({ audiobook = emptyAudiobook }: AudiobookFormProps
     } satisfies StagedUpload;
   }
 
-  async function handlePrepareAndSubmit(intent: "save" | "generate") {
+  async function handlePrepareAndSubmit() {
     if (!formRef.current) {
       return;
     }
 
     try {
       setClientError(null);
-      setIntentLabel(intent);
+      setIntentLabel("save");
 
       const source = new FormData(formRef.current);
       const batchByName = new Map(
@@ -334,7 +334,7 @@ export function AudiobookForm({ audiobook = emptyAudiobook }: AudiobookFormProps
         phase: "submitting",
         current: Math.max(queued.length, 1),
         total: Math.max(queued.length, 1),
-        message: intent === "generate" ? "All files staged. Submitting generation..." : "All files staged. Saving draft...",
+        message: "All files staged. Saving draft...",
       });
 
       const fileInputs = formRef.current.querySelectorAll("input[type='file']");
@@ -355,19 +355,11 @@ export function AudiobookForm({ audiobook = emptyAudiobook }: AudiobookFormProps
       const stagedCount = Object.keys(nextStaged).length;
       window.sessionStorage.setItem(
         AUDIOBOOK_FLASH_KEY,
-        intent === "generate"
-          ? `Staged audio committed to the draft. Generation started with ${stagedCount} uploaded file${stagedCount === 1 ? "" : "s"}.`
-          : `Staged audio committed to the draft. Saved ${stagedCount} uploaded file${stagedCount === 1 ? "" : "s"}.`,
+        `Staged audio committed to the draft. Saved ${stagedCount} uploaded file${stagedCount === 1 ? "" : "s"}.`,
       );
 
-      if (intent === "generate") {
-        if (generateSubmitRef.current) {
-          formRef.current.requestSubmit(generateSubmitRef.current);
-        }
-      } else {
-        if (saveSubmitRef.current) {
-          formRef.current.requestSubmit(saveSubmitRef.current);
-        }
+      if (saveSubmitRef.current) {
+        formRef.current.requestSubmit(saveSubmitRef.current);
       }
     } catch (error) {
       setProgress(null);
@@ -678,7 +670,7 @@ export function AudiobookForm({ audiobook = emptyAudiobook }: AudiobookFormProps
           disabled={Boolean(progress)}
           onClick={async (event) => {
             event.preventDefault();
-            await handlePrepareAndSubmit("save");
+            await handlePrepareAndSubmit();
           }}
           type="button"
         >
@@ -686,17 +678,24 @@ export function AudiobookForm({ audiobook = emptyAudiobook }: AudiobookFormProps
         </button>
         <button
           className="btn-secondary"
-          disabled={Boolean(progress)}
-          onClick={async (event) => {
+          disabled={Boolean(progress) || !audiobook.id}
+          onClick={(event) => {
             event.preventDefault();
-            await handlePrepareAndSubmit("generate");
+            setClientError(null);
+            setIntentLabel("generate");
+            setProgress(null);
+            if (generateSubmitRef.current && formRef.current) {
+              formRef.current.requestSubmit(generateSubmitRef.current);
+            }
           }}
           type="button"
         >
-          Save and generate
+          Generate
         </button>
         <span className="rounded-full border border-white/10 px-4 py-3 text-sm text-white/60">Status: {audiobook.status ?? "DRAFT"}</span>
       </div>
+
+      {!audiobook.id ? <p className="text-sm text-white/60">Save draft first to enable generate.</p> : null}
 
       <button className="hidden" name="intent" ref={saveSubmitRef} type="submit" value="save" />
       <button className="hidden" name="intent" ref={generateSubmitRef} type="submit" value="generate" />
@@ -704,7 +703,7 @@ export function AudiobookForm({ audiobook = emptyAudiobook }: AudiobookFormProps
       <ProgressBar intentLabel={intentLabel} progress={progress} />
 
       <p className={`text-sm ${payloadTooLarge ? "text-red-300" : "text-white/60"}`}>
-        Selected source payload: {selectedUploadMb} MB. Estimated MP3 output: {estimatedConvertedMb} MB. Save/generate submit stays small because files are staged first.
+        Selected source payload: {selectedUploadMb} MB. Estimated MP3 output: {estimatedConvertedMb} MB. Save draft stages uploads first; generate uses already-saved draft data only.
       </p>
 
       {payloadTooLarge ? (

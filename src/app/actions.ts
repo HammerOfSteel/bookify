@@ -72,6 +72,14 @@ function parseBatchAudioMapping(value: string): BatchAudioMapping {
   }
 }
 
+function normalizeOptional(value: string | null | undefined) {
+  if (!value || value === "undefined" || value === "null") {
+    return null;
+  }
+
+  return value;
+}
+
 function deriveAudiobookStatus(chapters: Array<{ title: string; audioPath?: string | null }>) {
   return chapters.length > 0 && chapters.every((chapter) => chapter.title && chapter.audioPath)
     ? ProjectStatus.READY
@@ -164,6 +172,52 @@ export async function saveAudiobookAction(_prevState: ActionResult, formData: Fo
     const session = await requireAuth();
     const audiobookId = getString(formData, "audiobookId");
     const intent = getString(formData, "intent") || "save";
+
+    if (intent === "generate") {
+      if (!audiobookId) {
+        return { error: "Save draft first before generating." };
+      }
+
+      const editable = await findEditableAudiobook(audiobookId, session.user.id, session.user.role);
+      const fullAudiobook = await prisma.audiobook.findUnique({
+        where: { id: editable.id },
+        include: { chapters: true, owner: { select: { name: true } } },
+      });
+
+      if (!fullAudiobook) {
+        return { error: "Audiobook not found." };
+      }
+
+      const hasAudio = fullAudiobook.chapters.some((chapter) => Boolean(chapter.audioPath));
+      if (!hasAudio) {
+        return { error: "Upload at least one chapter audio file before generating an audiobook." };
+      }
+
+      const generated = await generateAudiobookAssets(fullAudiobook);
+      const sortedChapters = [...fullAudiobook.chapters].sort((left, right) => left.position - right.position);
+
+      await prisma.$transaction([
+        prisma.audiobook.update({
+          where: { id: editable.id },
+          data: {
+            status: ProjectStatus.GENERATED,
+            generatedOutputPath: generated.outputPath,
+            generatedTimestampPath: generated.timestampPath,
+          },
+        }),
+        ...sortedChapters.map((chapter, index) =>
+          prisma.audiobookChapter.update({
+            where: { id: chapter.id },
+            data: { durationSeconds: generated.durations[index] ?? null },
+          }),
+        ),
+      ]);
+
+      revalidatePath("/dashboard");
+      revalidatePath(`/dashboard/audiobooks/${editable.id}`);
+      redirect(`/dashboard/audiobooks/${editable.id}`);
+    }
+
     const chapterCount = Math.min(getNumber(formData, "chapterCount", 1), 30);
     const coverFile = getFile(formData, "coverImage");
     const audioFormat = parseAudioFormat(getString(formData, "audioConversionFormat"));
@@ -175,14 +229,19 @@ export async function saveAudiobookAction(_prevState: ActionResult, formData: Fo
     const existing = audiobookId
       ? await findEditableAudiobook(audiobookId, session.user.id, session.user.role)
       : null;
+    const includePrologue = getString(formData, "includePrologue") === "on";
+    const includeEpilogue = getString(formData, "includeEpilogue") === "on";
+    const existingByPosition = new Map((existing?.chapters ?? []).map((chapter) => [chapter.position, chapter]));
 
     const chapterEntries = await Promise.all(
       Array.from({ length: chapterCount }, async (_, index) => {
+        const position = (includePrologue ? 2 : 1) + index;
+        const baseline = existingByPosition.get(position);
         const title = getString(formData, `chapterTitle-${index}`) || `Chapter ${index + 1}`;
-        const existingAudioPath = getString(formData, `chapterAudioExisting-${index}`) || null;
-        const existingAudioOriginalName = getString(formData, `chapterAudioOriginalNameExisting-${index}`) || null;
-        const stagedAudioPath = getString(formData, `chapterAudioStaged-${index}`) || null;
-        const stagedAudioOriginalName = getString(formData, `chapterAudioOriginalNameStaged-${index}`) || null;
+        const existingAudioPath = normalizeOptional(getString(formData, `chapterAudioExisting-${index}`)) || baseline?.audioPath || null;
+        const existingAudioOriginalName = normalizeOptional(getString(formData, `chapterAudioOriginalNameExisting-${index}`)) || baseline?.audioOriginalName || null;
+        const stagedAudioPath = normalizeOptional(getString(formData, `chapterAudioStaged-${index}`));
+        const stagedAudioOriginalName = normalizeOptional(getString(formData, `chapterAudioOriginalNameStaged-${index}`));
         const uploadedAudio = getFile(formData, `chapterAudio-${index}`);
         const batchFileName = batchMapping.chapters?.[String(index + 1)] ?? "";
         const mappedBatchAudio = batchFileName ? batchFilesByName.get(batchFileName) ?? null : null;
@@ -192,35 +251,37 @@ export async function saveAudiobookAction(_prevState: ActionResult, formData: Fo
 
         return {
           title,
+          position,
           audioPath,
           audioOriginalName,
         };
       }),
     );
 
-    const includePrologue = getString(formData, "includePrologue") === "on";
-    const includeEpilogue = getString(formData, "includeEpilogue") === "on";
     const prologueEntries = includePrologue
       ? [
           {
+            baseline: existingByPosition.get(1),
             title: getString(formData, "prologueTitle") || "Prologue",
-            existingAudioPath: getString(formData, "prologueAudioExisting") || null,
-            existingAudioOriginalName: getString(formData, "prologueAudioOriginalNameExisting") || null,
-            stagedAudioPath: getString(formData, "prologueAudioStaged") || null,
-            stagedAudioOriginalName: getString(formData, "prologueAudioOriginalNameStaged") || null,
+            existingAudioPath: normalizeOptional(getString(formData, "prologueAudioExisting")),
+            existingAudioOriginalName: normalizeOptional(getString(formData, "prologueAudioOriginalNameExisting")),
+            stagedAudioPath: normalizeOptional(getString(formData, "prologueAudioStaged")),
+            stagedAudioOriginalName: normalizeOptional(getString(formData, "prologueAudioOriginalNameStaged")),
             uploadedAudio: getFile(formData, "prologueAudio"),
             batchAudio: batchMapping.prologue ? batchFilesByName.get(batchMapping.prologue) ?? null : null,
           },
         ]
       : [];
+    const epiloguePosition = chapterCount + (includePrologue ? 2 : 1);
     const epilogueEntries = includeEpilogue
       ? [
           {
+            baseline: existingByPosition.get(epiloguePosition),
             title: getString(formData, "epilogueTitle") || "Epilogue",
-            existingAudioPath: getString(formData, "epilogueAudioExisting") || null,
-            existingAudioOriginalName: getString(formData, "epilogueAudioOriginalNameExisting") || null,
-            stagedAudioPath: getString(formData, "epilogueAudioStaged") || null,
-            stagedAudioOriginalName: getString(formData, "epilogueAudioOriginalNameStaged") || null,
+            existingAudioPath: normalizeOptional(getString(formData, "epilogueAudioExisting")),
+            existingAudioOriginalName: normalizeOptional(getString(formData, "epilogueAudioOriginalNameExisting")),
+            stagedAudioPath: normalizeOptional(getString(formData, "epilogueAudioStaged")),
+            stagedAudioOriginalName: normalizeOptional(getString(formData, "epilogueAudioOriginalNameStaged")),
             uploadedAudio: getFile(formData, "epilogueAudio"),
             batchAudio: batchMapping.epilogue ? batchFilesByName.get(batchMapping.epilogue) ?? null : null,
           },
@@ -230,27 +291,42 @@ export async function saveAudiobookAction(_prevState: ActionResult, formData: Fo
     const prologueInput = await Promise.all(
       prologueEntries.map(async (entry) => {
         const selectedAudio = entry.uploadedAudio ?? entry.batchAudio;
-        const audioPath = entry.stagedAudioPath ?? (selectedAudio ? await saveAudioUpload(selectedAudio, "uploads/audio", audioFormat) : entry.existingAudioPath);
-        const audioOriginalName = entry.stagedAudioOriginalName ?? (selectedAudio ? selectedAudio.name : entry.existingAudioOriginalName);
+        const audioPath = entry.stagedAudioPath ?? (selectedAudio ? await saveAudioUpload(selectedAudio, "uploads/audio", audioFormat) : entry.existingAudioPath || entry.baseline?.audioPath || null);
+        const audioOriginalName = entry.stagedAudioOriginalName ?? (selectedAudio ? selectedAudio.name : entry.existingAudioOriginalName || entry.baseline?.audioOriginalName || null);
 
-        return { title: entry.title, audioPath, audioOriginalName };
+        return { title: entry.title, position: 1, audioPath, audioOriginalName };
       }),
     );
 
     const epilogueInput = await Promise.all(
       epilogueEntries.map(async (entry) => {
         const selectedAudio = entry.uploadedAudio ?? entry.batchAudio;
-        const audioPath = entry.stagedAudioPath ?? (selectedAudio ? await saveAudioUpload(selectedAudio, "uploads/audio", audioFormat) : entry.existingAudioPath);
-        const audioOriginalName = entry.stagedAudioOriginalName ?? (selectedAudio ? selectedAudio.name : entry.existingAudioOriginalName);
+        const audioPath = entry.stagedAudioPath ?? (selectedAudio ? await saveAudioUpload(selectedAudio, "uploads/audio", audioFormat) : entry.existingAudioPath || entry.baseline?.audioPath || null);
+        const audioOriginalName = entry.stagedAudioOriginalName ?? (selectedAudio ? selectedAudio.name : entry.existingAudioOriginalName || entry.baseline?.audioOriginalName || null);
 
-        return { title: entry.title, audioPath, audioOriginalName };
+        return { title: entry.title, position: epiloguePosition, audioPath, audioOriginalName };
       }),
     );
 
-    const chapterInputs = [...prologueInput, ...chapterEntries, ...epilogueInput].map((chapter, index) => ({
-      ...chapter,
-      position: index + 1,
-    }));
+    let chapterInputs = [...prologueInput, ...chapterEntries, ...epilogueInput]
+      .sort((left, right) => left.position - right.position)
+      .map((chapter, index) => ({
+        ...chapter,
+        position: index + 1,
+      }));
+
+    const existingOrdered = [...(existing?.chapters ?? [])].sort((left, right) => left.position - right.position);
+    const incomingHasAudio = chapterInputs.some((chapter) => Boolean(chapter.audioPath));
+    const existingHasAudio = existingOrdered.some((chapter) => Boolean(chapter.audioPath));
+
+    // Defensive fallback: if the submit lost hidden fields, preserve already-saved audio by position.
+    if (!incomingHasAudio && existingHasAudio) {
+      chapterInputs = chapterInputs.map((chapter, index) => ({
+        ...chapter,
+        audioPath: chapter.audioPath ?? existingOrdered[index]?.audioPath ?? null,
+        audioOriginalName: chapter.audioOriginalName ?? existingOrdered[index]?.audioOriginalName ?? null,
+      }));
+    }
 
     const coverImagePath = coverFile ? await saveUpload(coverFile, "uploads/covers") : existing?.coverImagePath ?? null;
 
@@ -288,40 +364,9 @@ export async function saveAudiobookAction(_prevState: ActionResult, formData: Fo
           },
         });
 
-  if (intent === "generate") {
-    const fullAudiobook = await prisma.audiobook.findUnique({
-      where: { id: audiobook.id },
-      include: { chapters: true, owner: { select: { name: true } } },
-    });
-
-    if (!fullAudiobook) {
-      throw new Error("Audiobook not found after saving.");
-    }
-
-    const generated = await generateAudiobookAssets(fullAudiobook);
-    const sortedChapters = [...fullAudiobook.chapters].sort((left, right) => left.position - right.position);
-
-    await prisma.$transaction([
-      prisma.audiobook.update({
-        where: { id: audiobook.id },
-        data: {
-          status: ProjectStatus.GENERATED,
-          generatedOutputPath: generated.outputPath,
-          generatedTimestampPath: generated.timestampPath,
-        },
-      }),
-      ...sortedChapters.map((chapter, index) =>
-        prisma.audiobookChapter.update({
-          where: { id: chapter.id },
-          data: { durationSeconds: generated.durations[index] ?? null },
-        }),
-      ),
-    ]);
-  }
-
-  revalidatePath("/dashboard");
-  revalidatePath(`/dashboard/audiobooks/${audiobook.id}`);
-  redirect(`/dashboard/audiobooks/${audiobook.id}`);
+    revalidatePath("/dashboard");
+    revalidatePath(`/dashboard/audiobooks/${audiobook.id}`);
+    redirect(`/dashboard/audiobooks/${audiobook.id}`);
   } catch (error) {
     if (isRedirectError(error)) throw error;
     return { error: error instanceof Error ? error.message : "Something went wrong saving this audiobook." };
