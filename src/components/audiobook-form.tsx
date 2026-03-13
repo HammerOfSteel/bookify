@@ -156,7 +156,7 @@ function toMb(bytes: number) {
   return Math.round(bytes / (1024 * 1024));
 }
 
-function ProgressBar({ progress, intentLabel }: { progress: UploadProgressState | null; intentLabel: "save" | "generate" }) {
+function ProgressBar({ progress }: { progress: UploadProgressState | null }) {
   const { pending } = useFormStatus();
 
   if (!progress && !pending) {
@@ -167,11 +167,7 @@ function ProgressBar({ progress, intentLabel }: { progress: UploadProgressState 
     ? Math.max(5, Math.min(100, Math.round((progress.current / Math.max(progress.total, 1)) * 100)))
     : 100;
 
-  const message = progress
-    ? progress.message
-    : intentLabel === "generate"
-      ? "Submitting generation request..."
-      : "Submitting draft save...";
+  const message = progress ? progress.message : "Submitting draft save...";
 
   return (
     <div className="space-y-2">
@@ -183,11 +179,69 @@ function ProgressBar({ progress, intentLabel }: { progress: UploadProgressState 
   );
 }
 
+function GenerationProgress({
+  percent,
+  logs,
+  logsExpanded,
+  onToggleLogs,
+}: {
+  percent: number;
+  logs: string[];
+  logsExpanded: boolean;
+  onToggleLogs: () => void;
+}) {
+  const logsEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (logsExpanded && logsEndRef.current) {
+      logsEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [logs, logsExpanded]);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="mb-1.5 flex items-center justify-between">
+            <span className="text-xs text-white/70">Generating audiobook…</span>
+            <span className="text-xs font-semibold tabular-nums text-[var(--sand)]">{percent}%</span>
+          </div>
+          <div className="h-2 w-full overflow-hidden rounded-full bg-white/10">
+            <div
+              className="h-full bg-[var(--sand)] transition-all duration-300"
+              style={{ width: `${percent}%` }}
+            />
+          </div>
+        </div>
+        <button
+          className="shrink-0 rounded-lg border border-white/10 px-3 py-1.5 text-xs text-white/60 transition-colors hover:border-white/20 hover:text-white/90"
+          onClick={onToggleLogs}
+          type="button"
+        >
+          {logsExpanded ? "Hide logs ▲" : "Show logs ▼"}
+        </button>
+      </div>
+      {logsExpanded && (
+        <div className="max-h-52 overflow-y-auto rounded-xl border border-white/10 bg-black/30 p-4 font-mono text-xs leading-5 text-white/70">
+          {logs.length === 0 ? (
+            <p className="text-white/40">Waiting for generation to start…</p>
+          ) : (
+            logs.map((log, index) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: append-only log list
+              <p key={index}>{log}</p>
+            ))
+          )}
+          <div ref={logsEndRef} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function AudiobookForm({ audiobook = emptyAudiobook }: AudiobookFormProps) {
   const existing = splitExistingChapters(audiobook.chapters);
   const formRef = useRef<HTMLFormElement>(null);
   const saveSubmitRef = useRef<HTMLButtonElement>(null);
-  const generateSubmitRef = useRef<HTMLButtonElement>(null);
   const [state, formAction] = useActionState(saveAudiobookAction, null);
   const [chapterCount, setChapterCount] = useState(Math.max(existing.chapters.length || audiobook.chapterCount || 1, 1));
   const [selectedAudioSizes, setSelectedAudioSizes] = useState<Record<string, number>>({});
@@ -197,7 +251,10 @@ export function AudiobookForm({ audiobook = emptyAudiobook }: AudiobookFormProps
   const [batchFiles, setBatchFiles] = useState<File[]>([]);
   const [stagedUploads, setStagedUploads] = useState<Record<string, StagedUpload>>({});
   const [progress, setProgress] = useState<UploadProgressState | null>(null);
-  const [intentLabel, setIntentLabel] = useState<"save" | "generate">("save");
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generationPercent, setGenerationPercent] = useState(0);
+  const [generationLogs, setGenerationLogs] = useState<string[]>([]);
+  const [logsExpanded, setLogsExpanded] = useState(false);
   const [clientError, setClientError] = useState<string | null>(null);
   const [flashMessage, setFlashMessage] = useState<string | null>(null);
 
@@ -281,7 +338,6 @@ export function AudiobookForm({ audiobook = emptyAudiobook }: AudiobookFormProps
 
     try {
       setClientError(null);
-      setIntentLabel("save");
 
       const source = new FormData(formRef.current);
       const batchByName = new Map(
@@ -364,6 +420,66 @@ export function AudiobookForm({ audiobook = emptyAudiobook }: AudiobookFormProps
     } catch (error) {
       setProgress(null);
       setClientError(error instanceof Error ? error.message : "Failed to stage audio files.");
+    }
+  }
+
+  async function handleGenerate() {
+    if (!audiobook.id) return;
+
+    setIsGenerating(true);
+    setGenerationPercent(0);
+    setGenerationLogs([]);
+    setLogsExpanded(false);
+    setClientError(null);
+
+    try {
+      const response = await fetch(`/api/audiobooks/${audiobook.id}/generate`, { method: "POST" });
+
+      if (!response.ok || !response.body) {
+        const body = await response.json().catch(() => ({ error: "Generation failed to start." })) as { error?: string };
+        throw new Error(body.error ?? "Generation failed to start.");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+
+        for (const part of parts) {
+          const line = part.startsWith("data: ") ? part.slice(6) : part.trim();
+          if (!line) continue;
+
+          try {
+            const event = JSON.parse(line) as { type: string; percent?: number; message?: string; redirectUrl?: string };
+
+            if (event.type === "progress") {
+              setGenerationPercent(event.percent ?? 0);
+              if (event.message) {
+                setGenerationLogs((prev) => [...prev, event.message!]);
+              }
+            } else if (event.type === "done") {
+              setGenerationPercent(100);
+              window.location.href = event.redirectUrl ?? `/dashboard/audiobooks/${audiobook.id}`;
+              return;
+            } else if (event.type === "error") {
+              throw new Error(event.message ?? "Generation failed.");
+            }
+          } catch (parseError) {
+            if (parseError instanceof SyntaxError) continue;
+            throw parseError;
+          }
+        }
+      }
+    } catch (error) {
+      setClientError(error instanceof Error ? error.message : "Generation failed.");
+      setIsGenerating(false);
     }
   }
 
@@ -678,19 +794,14 @@ export function AudiobookForm({ audiobook = emptyAudiobook }: AudiobookFormProps
         </button>
         <button
           className="btn-secondary"
-          disabled={Boolean(progress) || !audiobook.id}
+          disabled={Boolean(progress) || isGenerating || !audiobook.id}
           onClick={(event) => {
             event.preventDefault();
-            setClientError(null);
-            setIntentLabel("generate");
-            setProgress(null);
-            if (generateSubmitRef.current && formRef.current) {
-              formRef.current.requestSubmit(generateSubmitRef.current);
-            }
+            handleGenerate();
           }}
           type="button"
         >
-          Generate
+          {isGenerating ? `Generating… ${generationPercent}%` : "Generate"}
         </button>
         <span className="rounded-full border border-white/10 px-4 py-3 text-sm text-white/60">Status: {audiobook.status ?? "DRAFT"}</span>
       </div>
@@ -698,9 +809,17 @@ export function AudiobookForm({ audiobook = emptyAudiobook }: AudiobookFormProps
       {!audiobook.id ? <p className="text-sm text-white/60">Save draft first to enable generate.</p> : null}
 
       <button className="hidden" name="intent" ref={saveSubmitRef} type="submit" value="save" />
-      <button className="hidden" name="intent" ref={generateSubmitRef} type="submit" value="generate" />
 
-      <ProgressBar intentLabel={intentLabel} progress={progress} />
+      {isGenerating ? (
+        <GenerationProgress
+          logs={generationLogs}
+          logsExpanded={logsExpanded}
+          onToggleLogs={() => setLogsExpanded((v) => !v)}
+          percent={generationPercent}
+        />
+      ) : (
+        <ProgressBar progress={progress} />
+      )}
 
       <p className={`text-sm ${payloadTooLarge ? "text-red-300" : "text-white/60"}`}>
         Selected source payload: {selectedUploadMb} MB. Estimated MP3 output: {estimatedConvertedMb} MB. Save draft stages uploads first; generate uses already-saved draft data only.
