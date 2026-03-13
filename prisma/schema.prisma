@@ -1,0 +1,98 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  USER
+}
+
+enum ProjectStatus {
+  DRAFT
+  READY
+  GENERATED
+}
+
+model User {
+  id           String      @id @default(cuid())
+  name         String
+  email        String      @unique
+  passwordHash String
+  role         UserRole    @default(USER)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  audiobooks   Audiobook[]
+  ebooks       Ebook[]
+}
+
+model Audiobook {
+  id                     String             @id @default(cuid())
+  title                  String
+  description            String             @db.Text
+  author                 String
+  releaseDate            DateTime?
+  metadata               Json?
+  chapterCount           Int
+  coverImagePath         String?
+  status                 ProjectStatus      @default(DRAFT)
+  outputPreference       String             @default("AUDIO")
+  generatedOutputPath    String?
+  generatedTimestampPath String?
+  ownerId                String
+  owner                  User               @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  chapters               AudiobookChapter[]
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+}
+
+model AudiobookChapter {
+  id              String    @id @default(cuid())
+  title           String
+  audioPath       String?
+  audioOriginalName String?
+  position        Int
+  durationSeconds Int?
+  audiobookId     String
+  audiobook       Audiobook @relation(fields: [audiobookId], references: [id], onDelete: Cascade)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([audiobookId, position])
+}
+
+model Ebook {
+  id                  String         @id @default(cuid())
+  title               String
+  description         String         @db.Text
+  author              String
+  releaseDate         DateTime?
+  metadata            Json?
+  theme               String         @default("classic")
+  chapterCount        Int
+  coverImagePath      String?
+  status              ProjectStatus  @default(DRAFT)
+  generatedOutputPath String?
+  ownerId             String
+  owner               User           @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  chapters            EbookChapter[]
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+}
+
+model EbookChapter {
+  id        String   @id @default(cuid())
+  title     String
+  content   String   @db.Text
+  position  Int
+  ebookId   String
+  ebook     Ebook    @relation(fields: [ebookId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([ebookId, position])
+}
