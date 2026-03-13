@@ -1,13 +1,14 @@
 "use client";
 
-import { useActionState, useMemo, useRef, useState } from "react";
-import { useFormStatus } from "react-dom";
+import { useActionState, useEffect, useMemo, useRef, useState } from "react";
+import { flushSync, useFormStatus } from "react-dom";
 import { saveAudiobookAction } from "@/app/actions";
 
 const MAX_SERVER_ACTION_PAYLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 const PAYLOAD_SAFETY_BUFFER_BYTES = 50 * 1024 * 1024;
 const MAX_SELECTED_UPLOAD_BYTES = MAX_SERVER_ACTION_PAYLOAD_BYTES - PAYLOAD_SAFETY_BUFFER_BYTES;
 const MP3_ESTIMATE_RATIO = 0.25;
+const AUDIOBOOK_FLASH_KEY = "bookify:audiobook-flash";
 
 type AudiobookFormProps = {
   audiobook?: {
@@ -198,6 +199,7 @@ export function AudiobookForm({ audiobook = emptyAudiobook }: AudiobookFormProps
   const [progress, setProgress] = useState<UploadProgressState | null>(null);
   const [intentLabel, setIntentLabel] = useState<"save" | "generate">("save");
   const [clientError, setClientError] = useState<string | null>(null);
+  const [flashMessage, setFlashMessage] = useState<string | null>(null);
 
   const batchMapping = useMemo(
     () => inferBatchMapping(batchFiles, chapterCount, includePrologue, includeEpilogue),
@@ -218,6 +220,17 @@ export function AudiobookForm({ audiobook = emptyAudiobook }: AudiobookFormProps
     epilogue: batchMapping.epilogue,
     chapters: batchMapping.chapters,
   });
+
+  useEffect(() => {
+    const message = window.sessionStorage.getItem(AUDIOBOOK_FLASH_KEY);
+
+    if (!message) {
+      return;
+    }
+
+    setFlashMessage(message);
+    window.sessionStorage.removeItem(AUDIOBOOK_FLASH_KEY);
+  }, []);
 
   function updateAudioSelection(slot: string, fileList: FileList | null) {
     setSelectedAudioSizes((current) => {
@@ -313,7 +326,10 @@ export function AudiobookForm({ audiobook = emptyAudiobook }: AudiobookFormProps
         nextStaged[queued[index].slot] = staged;
       }
 
-      setStagedUploads((current) => ({ ...current, ...nextStaged }));
+      flushSync(() => {
+        setStagedUploads((current) => ({ ...current, ...nextStaged }));
+      });
+
       setProgress({
         phase: "submitting",
         current: Math.max(queued.length, 1),
@@ -334,10 +350,24 @@ export function AudiobookForm({ audiobook = emptyAudiobook }: AudiobookFormProps
       setBatchFiles([]);
       setSelectedAudioSizes({});
 
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+      const stagedCount = Object.keys(nextStaged).length;
+      window.sessionStorage.setItem(
+        AUDIOBOOK_FLASH_KEY,
+        intent === "generate"
+          ? `Staged audio committed to the draft. Generation started with ${stagedCount} uploaded file${stagedCount === 1 ? "" : "s"}.`
+          : `Staged audio committed to the draft. Saved ${stagedCount} uploaded file${stagedCount === 1 ? "" : "s"}.`,
+      );
+
       if (intent === "generate") {
-        generateSubmitRef.current?.click();
+        if (generateSubmitRef.current) {
+          formRef.current.requestSubmit(generateSubmitRef.current);
+        }
       } else {
-        saveSubmitRef.current?.click();
+        if (saveSubmitRef.current) {
+          formRef.current.requestSubmit(saveSubmitRef.current);
+        }
       }
     } catch (error) {
       setProgress(null);
@@ -359,6 +389,11 @@ export function AudiobookForm({ audiobook = emptyAudiobook }: AudiobookFormProps
       {clientError && (
         <div className="rounded-[1.25rem] border border-red-500/30 bg-red-500/10 px-5 py-4 text-sm text-red-300">
           {clientError}
+        </div>
+      )}
+      {flashMessage && (
+        <div className="rounded-[1.25rem] border border-emerald-400/30 bg-emerald-500/10 px-5 py-4 text-sm text-emerald-100">
+          {flashMessage}
         </div>
       )}
 
