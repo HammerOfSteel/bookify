@@ -9,11 +9,20 @@ import { formatDuration, slugify } from "@/lib/utils";
 const execFileAsync = promisify(execFile);
 
 export type ProgressCallback = (percent: number, message: string) => void;
+export type AudiobookOutputMode = "MP4_YOUTUBE_FAST" | "M4B_FAST";
 
 type AudiobookWithRelations = Audiobook & {
   chapters: AudiobookChapter[];
   owner: Pick<User, "name">;
 };
+
+function resolveOutputMode(value: string | null | undefined): AudiobookOutputMode {
+  if (value === "M4B_FAST" || value === "AUDIO") {
+    return "M4B_FAST";
+  }
+
+  return "MP4_YOUTUBE_FAST";
+}
 
 async function assertBinary(command: string) {
   try {
@@ -41,6 +50,9 @@ function spawnFfmpeg(args: string[], totalSeconds: number, percentStart: number,
   return new Promise((resolve, reject) => {
     const proc = spawn("ffmpeg", args);
     const errChunks: Buffer[] = [];
+    const startedAt = Date.now();
+    let lastProgressPercent = -1;
+    let lastProgressAt = 0;
 
     proc.stderr.on("data", (chunk: Buffer) => {
       errChunks.push(chunk);
@@ -53,8 +65,25 @@ function spawnFfmpeg(args: string[], totalSeconds: number, percentStart: number,
           const decoded = Number.parseInt(match[1]) * 3600 + Number.parseInt(match[2]) * 60 + Number.parseFloat(match[3]);
           const ratio = Math.min(1, decoded / totalSeconds);
           const percent = Math.round(percentStart + ratio * (percentEnd - percentStart));
+          const now = Date.now();
+          const elapsedSeconds = Math.max(1, (now - startedAt) / 1000);
+          const speed = decoded / elapsedSeconds;
+          const remainingAudioSeconds = Math.max(0, totalSeconds - decoded);
+          const etaSeconds = Math.round(speed > 0 ? remainingAudioSeconds / speed : remainingAudioSeconds);
+
+          // Avoid flooding SSE logs while still giving frequent and meaningful updates.
+          if (percent === lastProgressPercent && now - lastProgressAt < 1500) {
+            return;
+          }
+
+          lastProgressPercent = percent;
+          lastProgressAt = now;
+
           const timeLabel = `${formatDuration(Math.round(decoded))} / ${formatDuration(totalSeconds)}`;
-          onProgress(percent, `ffmpeg: ${Math.round(ratio * 100)}% encoded (${timeLabel})`);
+          onProgress(
+            percent,
+            `ffmpeg: ${Math.round(ratio * 100)}% encoded (${timeLabel}) - ETA ${formatDuration(etaSeconds)} - ${speed.toFixed(2)}x`,
+          );
         }
       }
     });
@@ -72,15 +101,34 @@ function spawnFfmpeg(args: string[], totalSeconds: number, percentStart: number,
   });
 }
 
-async function createMp3Output(inputPaths: string[], outputPath: string, totalDurationSeconds: number, onProgress?: ProgressCallback) {
+async function createEncodedAudioOutput(
+  inputPaths: string[],
+  outputPath: string,
+  totalDurationSeconds: number,
+  onProgress?: ProgressCallback,
+) {
   await mkdir(dirname(outputPath), { recursive: true });
 
   if (inputPaths.length === 1) {
     await spawnFfmpeg(
-      ["-y", "-i", inputPaths[0], "-vn", "-ar", "44100", "-ac", "2", "-b:a", "192k", outputPath],
+      [
+        "-y",
+        "-i",
+        inputPaths[0],
+        "-vn",
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        outputPath,
+      ],
       totalDurationSeconds,
-      30,
-      78,
+      22,
+      88,
       onProgress,
     );
 
@@ -101,19 +149,22 @@ async function createMp3Output(inputPaths: string[], outputPath: string, totalDu
       "44100",
       "-ac",
       "2",
+      "-c:a",
+      "aac",
       "-b:a",
-      "192k",
+      "128k",
       outputPath,
     ],
     totalDurationSeconds,
-    30,
-    78,
+    22,
+    88,
     onProgress,
   );
 }
 
 export async function generateAudiobookAssets(audiobook: AudiobookWithRelations, onProgress?: ProgressCallback) {
   const report = onProgress ?? (() => {});
+  const mode = resolveOutputMode(audiobook.outputPreference);
 
   const chapters = audiobook.chapters
     .filter((chapter) => chapter.audioPath)
@@ -131,11 +182,11 @@ export async function generateAudiobookAssets(audiobook: AudiobookWithRelations,
   const slug = slugify(audiobook.title || "audiobook");
   const inputPaths = chapters.map((chapter) => publicPathToAbsolute(chapter.audioPath!));
 
-  report(8, `Measuring duration of ${chapters.length} chapter${chapters.length === 1 ? "" : "s"}...`);
+  report(6, `Measuring duration of ${chapters.length} chapter${chapters.length === 1 ? "" : "s"}...`);
   const durations = await Promise.all(
     inputPaths.map(async (filePath, index) => {
       const dur = await getAudioDurationSeconds(filePath);
-      const pct = 8 + Math.round(((index + 1) / inputPaths.length) * 22);
+      const pct = 6 + Math.round(((index + 1) / inputPaths.length) * 16);
       report(pct, `Measured "${chapters[index].title}": ${formatDuration(dur)}`);
       return dur;
     }),
@@ -143,12 +194,12 @@ export async function generateAudiobookAssets(audiobook: AudiobookWithRelations,
 
   const totalDurationSeconds = durations.reduce((total, dur) => total + dur, 0);
 
-  const audioRelativePath = `/storage/generated/audiobooks/${slug}-${Date.now()}.mp3`;
-  const audioAbsolutePath = publicPathToAbsolute(audioRelativePath);
+  const intermediateAudioRelativePath = `/storage/generated/audiobooks/${slug}-${Date.now()}-audio.m4a`;
+  const intermediateAudioAbsolutePath = publicPathToAbsolute(intermediateAudioRelativePath);
 
-  report(30, `Concatenating ${chapters.length} track${chapters.length === 1 ? "" : "s"} (total runtime: ${formatDuration(totalDurationSeconds)})...`);
-  await createMp3Output(inputPaths, audioAbsolutePath, totalDurationSeconds, onProgress);
-  report(80, "Audio concatenation complete.");
+  report(22, `Fast audio encode of ${chapters.length} track${chapters.length === 1 ? "" : "s"} (runtime: ${formatDuration(totalDurationSeconds)})...`);
+  await createEncodedAudioOutput(inputPaths, intermediateAudioAbsolutePath, totalDurationSeconds, onProgress);
+  report(88, "Audio track complete.");
 
   let offset = 0;
   const timestampText = chapters
@@ -159,21 +210,22 @@ export async function generateAudiobookAssets(audiobook: AudiobookWithRelations,
     })
     .join("\n");
 
-  report(84, "Writing chapter timestamps...");
+  report(90, "Writing chapter timestamps...");
   const timestampPath = await writeGeneratedFile(
     `storage/generated/audiobooks/${slug}-${Date.now()}-timestamps.txt`,
     timestampText,
   );
 
-  if (audiobook.outputPreference === "VIDEO") {
+  if (mode === "MP4_YOUTUBE_FAST") {
     if (!audiobook.coverImagePath) {
       throw new Error("Upload a cover image before generating a video audiobook.");
     }
 
     const videoRelativePath = `/storage/generated/audiobooks/${slug}-${Date.now()}.mp4`;
     const videoAbsolutePath = publicPathToAbsolute(videoRelativePath);
+    await mkdir(dirname(videoAbsolutePath), { recursive: true });
 
-    report(88, "Rendering video with cover image...");
+    report(92, "Rendering YouTube-fast MP4 (1 fps still image)...");
     await spawnFfmpeg(
       [
         "-y",
@@ -182,27 +234,31 @@ export async function generateAudiobookAssets(audiobook: AudiobookWithRelations,
         "-i",
         publicPathToAbsolute(audiobook.coverImagePath),
         "-i",
-        audioAbsolutePath,
+        intermediateAudioAbsolutePath,
+        "-r",
+        "1",
         "-c:v",
         "libx264",
+        "-preset",
+        "ultrafast",
         "-tune",
         "stillimage",
         "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
+        "copy",
+        "-movflags",
+        "+faststart",
         "-pix_fmt",
         "yuv420p",
         "-shortest",
         videoAbsolutePath,
       ],
       totalDurationSeconds,
-      88,
+      92,
       98,
       onProgress,
     );
 
-    report(98, "Video render complete.");
+    report(98, "YouTube-fast video render complete.");
 
     return {
       outputPath: videoRelativePath,
@@ -211,10 +267,30 @@ export async function generateAudiobookAssets(audiobook: AudiobookWithRelations,
     };
   }
 
-  report(98, "Finalizing...");
+  const m4bRelativePath = `/storage/generated/audiobooks/${slug}-${Date.now()}.m4b`;
+  const m4bAbsolutePath = publicPathToAbsolute(m4bRelativePath);
+  await mkdir(dirname(m4bAbsolutePath), { recursive: true });
+
+  report(94, "Packaging M4B audiobook...");
+  await spawnFfmpeg(
+    [
+      "-y",
+      "-i",
+      intermediateAudioAbsolutePath,
+      "-c:a",
+      "copy",
+      m4bAbsolutePath,
+    ],
+    totalDurationSeconds,
+    94,
+    99,
+    onProgress,
+  );
+
+  report(99, "M4B package complete.");
 
   return {
-    outputPath: audioRelativePath,
+    outputPath: m4bRelativePath,
     timestampPath,
     durations,
   };

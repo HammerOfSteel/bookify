@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { AudioLines, BookOpenText, Home, ShieldCheck } from "lucide-react";
+import { AudioLines, BookOpenText, Home, Mic2, ShieldCheck } from "lucide-react";
 import { SignOutButton } from "@/components/sign-out-button";
 
 type AppShellProps = {
@@ -15,6 +15,7 @@ const baseLinks = [
   { href: "/dashboard", label: "Overview", icon: Home },
   { href: "/dashboard/audiobooks", label: "Audiobooks", icon: AudioLines },
   { href: "/dashboard/ebooks", label: "Ebooks", icon: BookOpenText },
+  { href: "/dashboard/tts", label: "TTS Projects", icon: Mic2 },
 ];
 
 export function AppShell({ user, children }: AppShellProps) {

@@ -28,6 +28,7 @@ model User {
   updatedAt    DateTime    @updatedAt
   audiobooks   Audiobook[]
   ebooks       Ebook[]
+  ttsProjects  TtsProject[]
 }
 
 model Audiobook {
@@ -95,4 +96,42 @@ model EbookChapter {
   updatedAt DateTime @updatedAt
 
   @@unique([ebookId, position])
+}
+
+// ── TTS Projects ────────────────────────────────────────────────────────────
+
+model TtsProject {
+  id                  String       @id @default(cuid())
+  title               String
+  description         String       @db.Text
+  author              String
+  ttsProvider         String       @default("kokoro_local")
+  ttsVoice            String       @default("🇺🇸 🚺 Nicole 🎧")
+  ttsSpeed            Float        @default(1.0)
+  // Remote provider settings (stored as JSON: {apiKey, baseUrl, model, ...})
+  ttsRemoteSettings   Json?
+  chapterCount        Int
+  status              ProjectStatus @default(DRAFT)
+  generatedOutputPaths Json?        // array of per-chapter download paths
+  ownerId             String
+  owner               User         @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  chapters            TtsChapter[]
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+}
+
+model TtsChapter {
+  id              String     @id @default(cuid())
+  title           String
+  textContent     String?    @db.Text
+  textFileName    String?
+  position        Int
+  audioPath       String?
+  durationSeconds Int?
+  projectId       String
+  project         TtsProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@unique([projectId, position])
 }

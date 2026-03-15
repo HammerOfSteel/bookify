@@ -41,7 +41,10 @@ export default async function AudiobookPage({ params }: AudiobookPageProps) {
           metadata: audiobook.metadata ? JSON.stringify(audiobook.metadata, null, 2) : "",
           chapterCount: audiobook.chapterCount,
           coverImagePath: audiobook.coverImagePath,
-          outputPreference: audiobook.outputPreference === "VIDEO" ? "VIDEO" : "AUDIO",
+          outputPreference:
+            audiobook.outputPreference === "M4B_FAST" || audiobook.outputPreference === "AUDIO"
+              ? "M4B_FAST"
+              : "MP4_YOUTUBE_FAST",
           status: audiobook.status,
           generatedOutputPath: audiobook.generatedOutputPath,
           generatedTimestampPath: audiobook.generatedTimestampPath,

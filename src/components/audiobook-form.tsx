@@ -20,7 +20,7 @@ type AudiobookFormProps = {
     metadata: string;
     chapterCount: number;
     coverImagePath?: string | null;
-    outputPreference: "AUDIO" | "VIDEO";
+    outputPreference: "MP4_YOUTUBE_FAST" | "M4B_FAST";
     status?: string;
     generatedOutputPath?: string | null;
     generatedTimestampPath?: string | null;
@@ -39,7 +39,7 @@ const emptyAudiobook = {
   releaseDate: "",
   metadata: "",
   chapterCount: 3,
-  outputPreference: "AUDIO" as const,
+  outputPreference: "MP4_YOUTUBE_FAST" as const,
   chapters: [{ title: "Introduction" }, { title: "Chapter 1" }, { title: "Chapter 2" }],
 };
 
@@ -575,13 +575,14 @@ export function AudiobookForm({ audiobook = emptyAudiobook }: AudiobookFormProps
               Generate as
             </label>
             <select className="field" defaultValue={audiobook.outputPreference} id="outputPreference" name="outputPreference">
-              <option className="bg-slate-900 text-white" value="AUDIO">
-                MP3 audiobook
+              <option className="bg-slate-900 text-white" value="MP4_YOUTUBE_FAST">
+                MP4 (YouTube fast)
               </option>
-              <option className="bg-slate-900 text-white" value="VIDEO">
-                Cover-video MP4
+              <option className="bg-slate-900 text-white" value="M4B_FAST">
+                M4B (audiobook native)
               </option>
             </select>
+            <p className="mt-2 text-xs text-white/60">YouTube fast keeps a static cover image and writes chapter timestamps as a downloadable text file.</p>
           </div>
 
           <div>

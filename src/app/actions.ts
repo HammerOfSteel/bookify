@@ -53,6 +53,14 @@ function parseAudioFormat(value: string): AudioConversionFormat {
   return "mp3";
 }
 
+function parseAudiobookOutputPreference(value: string) {
+  if (value === "M4B_FAST" || value === "AUDIO") {
+    return "M4B_FAST";
+  }
+
+  return "MP4_YOUTUBE_FAST";
+}
+
 type BatchAudioMapping = {
   prologue?: string;
   epilogue?: string;
@@ -339,7 +347,7 @@ export async function saveAudiobookAction(_prevState: ActionResult, formData: Fo
       metadata: parseMetadata(getString(formData, "metadata")),
       chapterCount: chapterInputs.length,
       coverImagePath,
-      outputPreference: getString(formData, "outputPreference") || "AUDIO",
+      outputPreference: parseAudiobookOutputPreference(getString(formData, "outputPreference")),
       status,
     };
 
@@ -477,3 +485,100 @@ export async function deleteUserAction(id: string) {
   await prisma.user.delete({ where: { id } });
   revalidatePath("/admin/users");
 }
+
+// ── TTS Projects ─────────────────────────────────────────────────────────────
+
+async function findEditableTtsProject(id: string, actorId: string, actorRole: "ADMIN" | "USER") {
+  const project = await prisma.ttsProject.findUnique({ include: { chapters: true }, where: { id } });
+
+  if (!project) {
+    throw new Error("TTS project not found.");
+  }
+
+  if (actorRole !== "ADMIN" && project.ownerId !== actorId) {
+    throw new Error("You do not have access to this TTS project.");
+  }
+
+  return project;
+}
+
+export async function saveTtsProjectAction(_prevState: ActionResult, formData: FormData): Promise<ActionResult> {
+  try {
+    const session = await requireAuth();
+    const projectId = getString(formData, "projectId");
+    const chapterCount = Math.min(getNumber(formData, "chapterCount", 1), 40);
+
+    const existing = projectId ? await findEditableTtsProject(projectId, session.user.id, session.user.role) : null;
+    const existingByPosition = new Map((existing?.chapters ?? []).map((c) => [c.position, c]));
+
+    const chapterInputs = Array.from({ length: chapterCount }, (_, index) => {
+      const position = index + 1;
+      const baseline = existingByPosition.get(position);
+      const title = getString(formData, `chapterTitle-${index}`) || `Chapter ${index + 1}`;
+      const existingText = normalizeOptional(getString(formData, `chapterTextExisting-${index}`));
+      const existingFileName = normalizeOptional(getString(formData, `chapterTextFileNameExisting-${index}`));
+      // Text content is uploaded as a text file; content is read client-side and sent as a hidden field
+      const textContent = normalizeOptional(getString(formData, `chapterTextContent-${index}`)) ?? existingText ?? baseline?.textContent ?? null;
+      const textFileName = normalizeOptional(getString(formData, `chapterTextFileName-${index}`)) ?? existingFileName ?? baseline?.textFileName ?? null;
+
+      return { title, position, textContent, textFileName };
+    });
+
+    const remoteSettings = (() => {
+      const raw = normalizeOptional(getString(formData, "ttsRemoteSettings"));
+
+      if (!raw) {
+        return undefined;
+      }
+
+      try {
+        return JSON.parse(raw) as Prisma.InputJsonValue;
+      } catch {
+        return undefined;
+      }
+    })();
+
+    const data = {
+      title: getString(formData, "title"),
+      description: getString(formData, "description"),
+      author: getString(formData, "author"),
+      ttsProvider: getString(formData, "ttsProvider") || "kokoro_local",
+      ttsVoice: getString(formData, "ttsVoice") || "🇺🇸 🚺 Nicole 🎧",
+      ttsSpeed: Math.min(4, Math.max(0.5, Number.parseFloat(getString(formData, "ttsSpeed")) || 1)),
+      ttsRemoteSettings: remoteSettings ?? Prisma.JsonNull,
+      chapterCount: chapterInputs.length,
+    };
+
+    const project = existing
+      ? await prisma.ttsProject.update({
+          where: { id: existing.id },
+          data: {
+            ...data,
+            chapters: { deleteMany: {}, create: chapterInputs },
+          },
+        })
+      : await prisma.ttsProject.create({
+          data: {
+            ...data,
+            ownerId: session.user.id,
+            chapters: { create: chapterInputs },
+          },
+        });
+
+    revalidatePath("/dashboard");
+    revalidatePath(`/dashboard/tts/${project.id}`);
+    redirect(`/dashboard/tts/${project.id}`);
+  } catch (error) {
+    if (isRedirectError(error)) throw error;
+    return { error: error instanceof Error ? error.message : "Something went wrong saving this TTS project." };
+  }
+}
+
+export async function deleteTtsProjectAction(id: string) {
+  const session = await requireAuth();
+  await findEditableTtsProject(id, session.user.id, session.user.role);
+  await prisma.ttsProject.delete({ where: { id } });
+  revalidatePath("/dashboard");
+  revalidatePath("/dashboard/tts");
+}
+
